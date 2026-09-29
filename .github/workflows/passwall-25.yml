@@ -1,0 +1,127 @@
+#=================================================
+# Description: Build Passwall run file for OpenWrt 25 (apk)
+# Based on: https://github.com/wukongdaily/RunFilesBuilder
+#=================================================
+
+name: Make Passwall run files for OpenWrt 25
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Fetch latest release tag from Passwall
+        id: fetch_latest_tag
+        run: |
+          latest_tag=$(curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest | jq -r '.tag_name')
+          echo "LATEST_TAG=$latest_tag" >> $GITHUB_ENV
+
+      - name: Clone makeself repository
+        run: git clone https://github.com/megastep/makeself.git
+
+      - name: Download OpenWrt 25 apk files
+        run: |
+          mkdir -p downloads
+          cd downloads
+          curl -LO "$(
+            curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest \
+            | jq -r '.assets[]
+              | select(.name | test("^25\\.12\\+_luci-app-passwall-.*\\.apk$"))
+              | .browser_download_url'
+          )"
+          curl -LO "$(
+            curl -s https://api.github.com/repos/Openwrt-Passwall/openwrt-passwall/releases/latest \
+            | jq -r '.assets[]
+              | select(.name | test("^25\\.12\\+_luci-i18n-passwall-zh-cn-.*\\.apk$"))
+              | .browser_download_url'
+          )"
+          ls -lh
+
+      - name: Organize files
+        run: |
+          mkdir -p passwall_openwrt25/main
+          cp downloads/25*.apk passwall_openwrt25/main/
+          ls -lh passwall_openwrt25/main/
+
+      - name: Create install.sh script
+        run: |
+          cat <<'INSTALL_EOF' > passwall_openwrt25/install.sh
+          #!/bin/sh
+          wget -O /etc/apk/keys/openwrt-passwall-build.pem https://master.dl.sourceforge.net/project/openwrt-passwall-build/apk.pub
+          if [ $? -ne 0 ]; then
+              echo "download apk key failed。"
+              exit 1
+          fi
+          read release arch << EOF
+          $(. /etc/openwrt_release ; echo ${DISTRIB_RELEASE%.*} $DISTRIB_ARCH)
+          EOF
+          for feed in passwall_luci passwall_packages passwall2; do
+            echo "https://master.dl.sourceforge.net/project/openwrt-passwall-build/releases/packages-$release/$arch/$feed/packages.adb" >> /etc/apk/repositories.d/customfeeds.list
+          done
+          apk update
+          if [ $? -ne 0 ]; then
+              echo "update failed。"
+              exit 1
+          fi
+          apk add --allow-untrusted main/*.apk
+          if [ $? -ne 0 ]; then
+              echo "install failed。"
+              exit 1
+          fi
+          echo "Passwall for OpenWrt 25 installed successfully."
+          INSTALL_EOF
+          chmod +x passwall_openwrt25/install.sh
+
+      - name: Move passwall directory to makeself
+        run: |
+          mv passwall_openwrt25 makeself/
+
+      - name: Create self-extracting package
+        run: |
+          cd makeself
+          ./makeself.sh passwall_openwrt25/ passwall_openwrt25_${{ env.LATEST_TAG }}.run "Passwall for OpenWrt 25 (apk) by github action" ./install.sh
+
+      - name: Check file size
+        run: |
+          ls -lh makeself/passwall_openwrt25_*.run
+
+      - name: Preparing release name
+        run: |
+          release_name=$(TZ="Asia/Shanghai" date +'%Y-%m-%d %H:%M Build')
+          echo "RELEASE_NAME=$release_name" >> $GITHUB_ENV
+
+      - name: Fetch latest release details
+        id: fetch_release_details
+        run: |
+          extra_content="PassWall run file for OpenWrt 25.12+ (apk). Usage: sh passwall_openwrt25_*.run"
+          echo -e "$extra_content" > release_notes.md
+
+      - name: Print release notes
+        run: |
+          cat release_notes.md
+
+      - name: Generate new tag & release
+        uses: softprops/action-gh-release@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.LATEST_TAG }}-openwrt25
+          target_commitish: ${{ github.ref_name }}
+          prerelease: false
+          body_path: release_notes.md
+
+      - name: Upload run file as release asset
+        uses: softprops/action-gh-release@v2.1.0
+        with:
+          tag_name: ${{ env.LATEST_TAG }}-openwrt25
+          name: "PassWall-OpenWrt25-${{ env.LATEST_TAG }}"
+          files: makeself/passwall_openwrt25_*.run
+          token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
